@@ -1,0 +1,46 @@
+{
+  "name": "dsh-plugin-usage-stats",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Whole-corpus token usage statistics: daily and cumulative tokens, cache hit rate, per-model breakdown, and a year-long activity heatmap.",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "usage-fold.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "verify:logs": "node verify/real-logs.js",
+    "verify:cut": "node verify/cut-compare.js",
+    "verify:payload": "node verify/payload-conformance.js",
+    "verify:read": "node verify/session-read-audit.js",
+    "verify:v0": "node verify/v0-artifacts.js",
+    "verify:corpus": "node verify/corpus-pass.js",
+    "verify:trend": "node verify/trend-inspect.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

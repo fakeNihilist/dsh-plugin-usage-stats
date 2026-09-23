@@ -1,0 +1,4 @@
+{
+  "title": "Usage Statistics",
+  "description": "Model token usage across all sessions: daily and cumulative tokens, cache hit rate, and day/week/month heatmaps."
+}
