@@ -80,25 +80,33 @@ window.__ModuleLoader__.load({
      * different periods with no sign that they had drifted apart.
      */
     const TREND_PANEL_ID = "usage-range-panel";
-    /** Line/donut colours, in fixed order, so a route keeps its colour across views. */
+    /**
+     * Line/donut colours, in fixed order, so a route keeps its colour across views.
+     *
+     * Four of the six read the theme's own ramp; the theme ships no violet and no
+     * sky-cyan, so the fourth and sixth slots keep local values — folding them onto
+     * its blue would leave two neighbouring routes wearing the same colour. Being
+     * `var()` references rather than values, these can only be painted through a
+     * style (see the charts), never through an SVG presentation attribute.
+     */
     const SERIES_COLORS = [
-      "#4f8ef7",
-      "#3ec98a",
-      "#f5a623",
+      "var(--dsw-static-blue-450)",
+      "var(--dsw-static-green-400)",
+      "var(--dsw-static-amber-500)",
       "#b06ef5",
-      "#f2637c",
+      "var(--dsw-static-red-400)",
       "#38bdf8",
     ];
     /**
-     * The cache-hit ratio's own colour, a light yellow.
+     * The cache-hit ratio's own colour, the theme's warm amber.
      *
      * It is deliberately not a member of SERIES_COLORS: those colour the ring's
      * slices by position, so reusing an index here would silently recolour a slice.
-     * The value is opaque on purpose — how far it is allowed to show through the
+     * The colour is opaque on purpose — how far it is allowed to show through the
      * grid is the stylesheet's single `opacity` on `.usage-cache-bar`, so the two
      * cannot multiply into a bar nobody can see.
      */
-    const CACHE_COLOR = "#f5d76e";
+    const CACHE_COLOR = "var(--dsw-alias-state-warn-secondary)";
 
     //#region formatting
 
@@ -474,26 +482,26 @@ window.__ModuleLoader__.load({
     //#region styles
 
     const CSS = `
-/* The theme's own subtle tokens are tuned for its chrome, not for a full page of
-   cards, and on the light theme both are too faint to read: --dsw-alias-border-l1
-   is #0000000a there (under 4% black) against a white card on a white page, so the
-   card outlines and every table rule all but vanish, and --dsw-alias-label-secondary
-   sits at #61666b on white — about 5.8:1, washed out across a dense dashboard.
-   Both locals are therefore derived from the theme's primary label colour, which
-   keeps them tracking whatever the theme does, at a weight that survives the light
-   theme: the border lands around #dddddd and the caption colour around #525354
-   (roughly 7.6:1), while the dark theme keeps the values it already had.
-   The dark block is written against body[data-ds-dark-theme] because that attribute
-   is what the theme plugin actually sets — a prefers-color-scheme query would be
-   wrong for a user who picked dark on a light OS. */
+/* The theme's first two border weights are tuned for its chrome, not for a full
+   page of cards: --dsw-alias-border-l1 is #0000000a on the light theme (under 4%
+   black) against a white card on a white page, so the card outlines and every table
+   rule all but vanish. The panel therefore starts at the third weight and pairs it
+   with the fourth — 12%/16% on light, 16%/20% on dark — which is the first pair that
+   reads across a dense dashboard, and both still track whatever the theme does.
+   Text has no such seam: --dsw-alias-label-secondary sits at #61666b on white
+   (about 5.8:1) and is the darkest caption tone the theme ships — tertiary and
+   caption are lighter still — so --usage-label-2 stays derived from the primary
+   label colour, at roughly #525354 (7.6:1).
+   That one local needs a dark override, written against body[data-ds-dark-theme]
+   because that attribute is what the theme plugin actually sets — a
+   prefers-color-scheme query would be wrong for a user who picked dark on a light
+   OS. */
 .usage-panel {
-  --usage-border: color-mix(in oklab, var(--dsw-alias-label-primary) 14%, transparent);
-  --usage-border-strong: color-mix(in oklab, var(--dsw-alias-label-primary) 22%, transparent);
+  --usage-border: var(--dsw-alias-border-l3);
+  --usage-border-strong: var(--dsw-alias-border-l4);
   --usage-label-2: color-mix(in oklab, var(--dsw-alias-label-primary) 72%, transparent);
 }
 body[data-ds-dark-theme] .usage-panel {
-  --usage-border: var(--dsw-alias-border-l1);
-  --usage-border-strong: var(--dsw-alias-border-l2);
   --usage-label-2: var(--dsw-alias-label-secondary);
 }
 .usage-panel {
@@ -640,7 +648,7 @@ body[data-ds-dark-theme] .usage-panel {
 }
 .usage-heat-months { color: var(--usage-label-2); font-size: ${LABEL_EM}px; line-height: 14px; margin-bottom: ${MONTH_GAP_PX}px; }
 .usage-heat-months > span { white-space: nowrap; }
-.usage-heat-scroll { padding-bottom: 2px; overflow-x: auto; }
+.usage-heat-scroll { padding-bottom: 2px; }
 /* Seven weekdays per column, filled column by column. */
 .usage-heat {
   grid-auto-flow: column;
@@ -649,10 +657,12 @@ body[data-ds-dark-theme] .usage-panel {
 /* Square by construction: the height follows the track width, so a cell cannot
    disagree with the pitch it is laid out on. */
 .usage-cell { aspect-ratio: 1; border-radius: 2px; background: var(--dsw-alias-state-idle-primary); }
-.usage-cell.l1 { background: #b9d4fb; }
-.usage-cell.l2 { background: #7aaef8; }
-.usage-cell.l3 { background: #4f8ef7; }
-.usage-cell.l4 { background: #1560d4; }
+/* Four steps off the theme's own blue ramp. Static tokens, so the scale cannot be
+   repainted by a theme switch — it stays the same blue on light and dark. */
+.usage-cell.l1 { background: var(--dsw-static-blue-100); }
+.usage-cell.l2 { background: var(--dsw-static-blue-300); }
+.usage-cell.l3 { background: var(--dsw-static-blue-450); }
+.usage-cell.l4 { background: var(--dsw-static-blue-600); }
 .usage-cell[data-hover="true"] { outline: 1.5px solid var(--dsw-alias-label-primary); outline-offset: 1px; }
 .usage-legend { display: flex; align-items: center; gap: 5px; justify-content: flex-end; color: var(--usage-label-2); font-size: 11px; }
 
@@ -675,7 +685,7 @@ body[data-ds-dark-theme] .usage-panel {
   border-radius: 8px;
   border: 1px solid var(--usage-border-strong);
   background: var(--dsw-alias-bg-overlay);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 28%);
+  box-shadow: var(--dsw-shadow-lv3);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -742,7 +752,7 @@ body[data-ds-dark-theme] .usage-panel {
   font-size: 11px;
   font-weight: 500;
   color: var(--usage-label-2);
-  background: color-mix(in oklab, var(--dsw-alias-label-primary) 4%, transparent);
+  background: var(--dsw-alias-interactive-bg-hover);
   padding: 6px 8px;
   border-bottom: 1px solid var(--usage-border);
 }
@@ -753,9 +763,9 @@ body[data-ds-dark-theme] .usage-panel {
    the body scrolls under them. */
 .usage-table-scroll .usage-table thead th { position: sticky; top: 0; z-index: 1; background: var(--dsw-alias-bg-layer-1); }
 
-.usage-progress { height: 2px; border-radius: 1px; overflow: hidden; background: color-mix(in oklab, #4f8ef7 25%, transparent); }
+.usage-progress { height: 2px; border-radius: 1px; overflow: hidden; background: color-mix(in oklab, var(--dsw-alias-state-business-primary) 25%, transparent); }
 .usage-progress > span {
-  display: block; width: 30%; height: 100%; border-radius: 1px; background: #4f8ef7;
+  display: block; width: 30%; height: 100%; border-radius: 1px; background: var(--dsw-alias-state-business-primary);
   animation: usage-slide 1.1s ease-in-out infinite;
 }
 @keyframes usage-slide {
@@ -1726,8 +1736,12 @@ body[data-ds-dark-theme] .usage-panel {
                 y: baseline - barHeight,
                 width: cacheBarWidth,
                 height: barHeight,
-                fill: cache.color,
-                style: { transform: grown ? "scaleY(1)" : "scaleY(0)" },
+                // The colour is a token reference, which only resolves through style:
+                // as the fill attribute it is invalid and the bar paints black.
+                style: {
+                  fill: cache.color,
+                  transform: grown ? "scaleY(1)" : "scaleY(0)",
+                },
               });
             }),
             // One stack per day: input at the baseline, output stacked above it.
@@ -1745,8 +1759,10 @@ body[data-ds-dark-theme] .usage-panel {
                   y: cursor,
                   width: barWidth,
                   height: barHeight,
-                  fill: line.color,
-                  style: { transform: grown ? "scaleY(1)" : "scaleY(0)" },
+                  style: {
+                    fill: line.color,
+                    transform: grown ? "scaleY(1)" : "scaleY(0)",
+                  },
                 });
               });
             }),
@@ -1781,7 +1797,7 @@ body[data-ds-dark-theme] .usage-panel {
                   cx: xOf(active),
                   cy: padTop + plotHeight - plotHeight * cache.values[active],
                   r: 3.5,
-                  fill: cache.color,
+                  style: { fill: cache.color },
                 }),
           ],
         ),
@@ -1902,7 +1918,7 @@ body[data-ds-dark-theme] .usage-panel {
                     cy: center,
                     r: radius,
                     fill: "none",
-                    stroke: slice.color,
+                    style: { stroke: slice.color },
                     strokeWidth:
                       hover === null || hover === slice.key
                         ? stroke

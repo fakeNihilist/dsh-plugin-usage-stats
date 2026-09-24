@@ -658,10 +658,15 @@ test('the panel renders real data without throwing', () => {
   assert.ok(Array.isArray(css), 'the style element carries its rule text as a child');
   assert.ok(css[0].includes('.usage-panel'), 'the stylesheet holds the panel rules');
   assert.ok(css[0].includes('max-width: 960px'), 'the panel is capped at the Plugins page measure');
-  // The ramp is four literal blues rather than a theme token, so a theme switch
-  // cannot repaint the scale. Checked rule by rule: the new range control's focus
-  // ring deliberately does follow the theme.
-  for (const [level, color] of [['l1', '#b9d4fb'], ['l2', '#7aaef8'], ['l3', '#4f8ef7'], ['l4', '#1560d4']]) {
+  // The ramp is four steps off the theme's static blue scale rather than an alias
+  // token, so a theme switch cannot repaint the scale. Checked rule by rule: the
+  // new range control's focus ring deliberately does follow the theme.
+  for (const [level, color] of [
+    ['l1', 'var(--dsw-static-blue-100)'],
+    ['l2', 'var(--dsw-static-blue-300)'],
+    ['l3', 'var(--dsw-static-blue-450)'],
+    ['l4', 'var(--dsw-static-blue-600)'],
+  ]) {
     assert.ok(
       css[0].includes(`.usage-cell.${level} { background: ${color}; }`),
       `heat level ${level} keeps its own blue (${color})`,
@@ -944,32 +949,41 @@ test('month labels are Chinese, under the zh dictionary the panel ships', () => 
   );
 });
 
-test('the panel carries light-theme borders and text weight of its own', () => {
+test('the panel lifts the theme border weight and derives its own caption tone', () => {
   const payload = payloadFromRealLogs() ?? payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
   const css = nodes.find((node) => node.type === 'style').props.children[0];
 
-  // The theme's own subtle tokens are tuned for its chrome, not for a full page of
-  // cards, and on the light theme they go nearly invisible: --dsw-alias-border-l1
-  // is #0000000a there against a white card on a white page. The panel therefore
-  // defines its own pair, derived from the label colour so it tracks the theme.
+  // The theme's first two border weights are tuned for its chrome, not for a full
+  // page of cards, and on the light theme they go nearly invisible:
+  // --dsw-alias-border-l1 is #0000000a there against a white card on a white page.
+  // The panel therefore starts one step up the theme's own ramp.
   assert.match(
     css,
-    /\.usage-panel\s*\{[^}]*--usage-border:\s*color-mix\(in oklab, var\(--dsw-alias-label-primary\)/,
-    'the panel derives its own border weight from the theme label colour',
+    /\.usage-panel\s*\{[^}]*--usage-border:\s*var\(--dsw-alias-border-l3\)/,
+    "the panel starts at the theme's third border weight",
   );
   assert.match(
     css,
-    /\.usage-panel\s*\{[^}]*--usage-label-2:/,
-    'the panel maps its own secondary-label colour',
+    /\.usage-panel\s*\{[^}]*--usage-border-strong:\s*var\(--dsw-alias-border-l4\)/,
+    'and pairs it with the fourth',
   );
-  // The dark theme keeps the theme's original values, keyed on the attribute the
-  // theme plugin actually sets — not on prefers-color-scheme, which would be wrong
-  // for a user who picked dark on a light OS.
+  // Text has no such step: every caption tone the theme ships sits at or above
+  // --dsw-alias-label-secondary (#61666b on white, about 5.8:1), which is washed out
+  // across a dense dashboard. This one local therefore stays derived from the label
+  // colour, and it is the only one left to override.
   assert.match(
     css,
-    /body\[data-ds-dark-theme\] \.usage-panel\s*\{[^}]*--usage-border:\s*var\(--dsw-alias-border-l1\)/,
-    'the dark theme restores the theme tokens',
+    /\.usage-panel\s*\{[^}]*--usage-label-2:\s*color-mix\(in oklab, var\(--dsw-alias-label-primary\)/,
+    'the panel derives its own secondary-label colour',
+  );
+  // The override is keyed on the attribute the theme plugin actually sets — not on
+  // prefers-color-scheme, which would be wrong for a user who picked dark on a light
+  // OS.
+  assert.match(
+    css,
+    /body\[data-ds-dark-theme\] \.usage-panel\s*\{[^}]*--usage-label-2:\s*var\(--dsw-alias-label-secondary\)/,
+    'the dark theme restores the theme label tone',
   );
 
   // Both locals are actually consumed: every rule that used to read the theme token
@@ -1369,7 +1383,12 @@ test('the trend chart stacks input and output per day and bars the cache rate', 
     assert.ok(columns[index] > columns[index - 1], 'bars advance in day order');
   }
   // The two stacks differ in colour, or input and output are indistinguishable.
-  assert.notEqual(bars[0].props.fill, bars[1].props.fill, 'input and output carry different colours');
+  // The colour is painted through the style, so that a `var()` reference resolves.
+  assert.notEqual(
+    bars[0].props.style.fill,
+    bars[1].props.style.fill,
+    'input and output carry different colours',
+  );
 
   // The ratio is a bar of its own, one per day that billed input — no longer a
   // smoothed line, so no path is drawn on this chart at all.
@@ -1384,7 +1403,11 @@ test('the trend chart stacks input and output per day and bars the cache rate', 
   ));
   assert.equal(ratioBars.length, billedDays.length, 'one ratio bar per day that billed input');
   for (const bar of ratioBars) {
-    assert.equal(bar.props.fill.toLowerCase(), '#f5d76e', 'the ratio bar is the light yellow');
+    assert.equal(
+      bar.props.style.fill,
+      'var(--dsw-alias-state-warn-secondary)',
+      'the ratio bar wears the theme amber',
+    );
     // It grows out of the baseline like every other bar on the chart.
     assert.ok(
       Math.abs(Number(bar.props.y) + Number(bar.props.height) - (12 + (240 - 12 - 26))) < 0.001,
