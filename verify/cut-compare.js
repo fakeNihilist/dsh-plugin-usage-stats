@@ -148,12 +148,18 @@ for (const [label, cutOf] of Object.entries(strategies)) {
 // a tagged marker exists, since those sessions are the only ones that inherit.
 const shipped = foldAll(strategies['E: SHIPPED RULE - isSeeded ? taggedMarker : 0']);
 const tagged = foldAll(strategies['C: tagged `inherited: true` marker only']);
+const agrees = totalOf(shipped.totals) === totalOf(tagged.totals)
+  && shipped.totals.calls === tagged.totals.calls;
 console.log('');
-console.log(
-  totalOf(shipped.totals) === totalOf(tagged.totals) && shipped.totals.calls === tagged.totals.calls
-    ? `CROSS-CHECK OK: shipped rule == tagged-marker rule (${shipped.totals.calls} calls, ${totalOf(shipped.totals)} tokens)`
-    : `CROSS-CHECK MISMATCH: shipped=${shipped.totals.calls}/${totalOf(shipped.totals)} tagged=${tagged.totals.calls}/${totalOf(tagged.totals)}`,
-);
+if (agrees) {
+  console.log(`CROSS-CHECK OK: shipped rule == tagged-marker rule (${shipped.totals.calls} calls, ${totalOf(shipped.totals)} tokens)`);
+} else {
+  // This script compares cut strategies, and the cross-check is the one comparison on
+  // which the shipped rule itself is the subject. It used to print the mismatch and
+  // exit 0, so a broken shipped rule reported success to anything reading the status.
+  console.log(`CROSS-CHECK MISMATCH: shipped=${shipped.totals.calls}/${totalOf(shipped.totals)} tagged=${tagged.totals.calls}/${totalOf(tagged.totals)}`);
+  process.exitCode = 1;
+}
 
 console.log('');
 console.log('session detail (seeded-ness vs markers):');

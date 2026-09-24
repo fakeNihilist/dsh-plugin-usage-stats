@@ -460,7 +460,8 @@ export function foldSessionIntoAggregate(aggregate, input, options) {
  * @param {object} aggregate - the folded aggregate.
  * @param {{ revision: number, seeding: boolean, tzOffsetMinutes: number, from: string, to: string, today: string,
  *           focus?: { workspace?: string|null, start?: string|null, end?: string|null },
- *           telemetry: { sessionsScanned: number, sessionsFailed: number, failureReasons?: string[] } }} options
+ *           telemetry: { sessionsScanned: number, sessionsFailed: number, recovered?: number,
+ *                        corpusFailures?: number, failureReasons?: object[] } }} options
  * @returns {object} the JSON-safe payload.
  */
 export function buildPayload(aggregate, options) {
@@ -591,6 +592,11 @@ export function buildPayload(aggregate, options) {
       sessionsScanned: options.telemetry.sessionsScanned,
       sessionsFailed: options.telemetry.sessionsFailed,
       recoveredSessions: options.telemetry.recovered ?? 0,
+      // 0 or 1. A corpus enumeration that has not succeeded leaves the live feed
+      // refusing every session (its ownership cannot be decided), so the panel shows
+      // a figure that is wrong rather than merely incomplete — this is what lets it
+      // say so instead of printing zeroes with no explanation.
+      corpusFailures: options.telemetry.corpusFailures ?? 0,
       failureReasons: options.telemetry.failureReasons ?? [],
     },
   };

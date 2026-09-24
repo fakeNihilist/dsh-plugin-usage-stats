@@ -170,14 +170,22 @@ test('a listed session still folds only events beyond the pass cursor', async ()
 });
 
 test('a session the pass could not read hands its live settlements to the feed', async () => {
-  const host = harness([EARLY]);
+  // BROKEN is LISTED here, which is what makes this the release path rather than the
+  // generic "never listed" one: the pass claims a listed session's history, so it has
+  // to hand the session back when it turns out to be unreadable, or the feed would
+  // refuse a settlement that no other contributor can count.
+  const host = harness([EARLY, BROKEN]);
   const before = await host.get();
+  assert.equal(before.warnings.sessionsFailed, 1, 'the listed session is reported unreadable');
 
   // Nothing else will ever count this session: the pass gave up on its history and
   // will not list it again, so the feed has to take its settlements from here.
   host.emit(BROKEN_LIVE, settlement(9, 320));
 
   const after = await host.get();
-  assert.equal(after.today.calls - before.today.calls, 1);
+  assert.equal(after.today.calls - before.today.calls, 1, 'the released session is adopted by the feed');
   assert.equal(totalOf(after.today) - totalOf(before.today), 320);
+  // And it is not re-counted on every later poll.
+  const settled = await host.get();
+  assert.equal(settled.today.calls, after.today.calls, 'the adoption does not repeat');
 });

@@ -648,7 +648,10 @@ body[data-ds-dark-theme] .usage-panel {
 }
 .usage-heat-months { color: var(--usage-label-2); font-size: ${LABEL_EM}px; line-height: 14px; margin-bottom: ${MONTH_GAP_PX}px; }
 .usage-heat-months > span { white-space: nowrap; }
-.usage-heat-scroll { padding-bottom: 2px; }
+/* The scroll partner of that floor: once the columns need more than the card's
+   width, this is what the excess goes into, so a long corpus widens the grid's
+   scrollable area instead of spilling past the card's edge. */
+.usage-heat-scroll { padding-bottom: 2px; overflow-x: auto; }
 /* Seven weekdays per column, filled column by column. */
 .usage-heat {
   grid-auto-flow: column;
@@ -2390,13 +2393,22 @@ body[data-ds-dark-theme] .usage-panel {
         );
 
         // Only describe problems that actually exist; a clean corpus stays quiet.
+        // An unenumerated corpus is the loudest of them: the session counters can all
+        // read zero while the figures above are simply wrong, because nothing was
+        // folded and the live feed is refusing every session it cannot yet classify.
         const warnings = payload.warnings;
+        const reasons = warnings.failureReasons ?? [];
         if (
           warnings.sessionsFailed > 0 ||
           warnings.malformedUsageEvents > 0 ||
-          warnings.recoveredSessions > 0
+          warnings.recoveredSessions > 0 ||
+          warnings.corpusFailures > 0 ||
+          reasons.length > 0
         ) {
           const lines = [];
+          if (warnings.corpusFailures > 0) {
+            lines.push(t("corpusFailed"));
+          }
           if (warnings.sessionsFailed > 0) {
             lines.push(`${warnings.sessionsFailed} ${t("sessionsFailed")}`);
           }
@@ -2410,7 +2422,6 @@ body[data-ds-dark-theme] .usage-panel {
               `${warnings.malformedUsageEvents} ${t("malformedEvents")}`,
             );
           }
-          const reasons = warnings.failureReasons ?? [];
           body.push(
             h("div", { className: "usage-stage-note", key: "warn" }, [
               h(
@@ -2418,11 +2429,14 @@ body[data-ds-dark-theme] .usage-panel {
                 { className: "usage-card-note", key: "l" },
                 lines.join(", "),
               ),
-              ...reasons.map((entry) =>
+              // String entries, so the index is the only stable identity: two
+              // reasons may legitimately share a key (a corpus failure and a session
+              // failure can carry the same message).
+              ...reasons.map((entry, index) =>
                 h(
                   "div",
                   {
-                    key: entry.key,
+                    key: `${entry.key}-${index}`,
                     className: "usage-card-note",
                   },
                   entry.count > 1
@@ -2575,6 +2589,8 @@ body[data-ds-dark-theme] .usage-panel {
       sessionsRecovered:
         "\u4e2a\u4f1a\u8bdd\u4ece\u65e7\u683c\u5f0f\u6062\u590d",
       malformedEvents: "\u6761\u7528\u91cf\u8bb0\u5f55\u5f02\u5e38",
+      corpusFailed:
+        "\u4f1a\u8bdd\u8bed\u6599\u672a\u80fd\u679a\u4e3e\uff0c\u4e0b\u65b9\u6570\u5b57\u4f4e\u4e8e\u5b9e\u9645\u7528\u91cf",
     };
 
     const en = {
@@ -2632,6 +2648,7 @@ body[data-ds-dark-theme] .usage-panel {
       sessionsFailed: "sessions unreadable",
       sessionsRecovered: "sessions recovered from a legacy format",
       malformedEvents: "malformed usage records",
+      corpusFailed: "the session corpus was never enumerated, so the figures below understate the real usage",
     };
 
     //#endregion

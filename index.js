@@ -104,7 +104,13 @@ const ledger = {
   backfill: null,
   /** Live-fold errors, kept separate from session read failures. */
   liveFoldErrors: 0,
-  telemetry: { sessionsScanned: 0, sessionsFailed: 0, recovered: 0, failureReasons: [] },
+  /**
+   * `corpusFailures` is 0 or 1, never a retry count, and it tracks the CURRENT
+   * state rather than the process's history: it is set when an enumeration attempt
+   * throws and cleared by the next one that succeeds, because a pass that succeeds
+   * has listed and folded everything the failed one could not.
+   */
+  telemetry: { sessionsScanned: 0, sessionsFailed: 0, recovered: 0, corpusFailures: 0, failureReasons: [] },
   tzOffsetMinutes: 0,
 };
 
@@ -150,13 +156,19 @@ function todayKey() {
 /**
  * Exact count of fork-inherited leading events for one session log.
  *
- * Getting this wrong double-counts a fork parent's tokens, so it is computed
- * rather than assumed. A persisted JSONL header only records
- * `inheritedEventCount` for a seeded session (see the backend's
- * `toHeaderLine`), while the service reports 0 for every other session, so the
- * reported value is used ONLY when the header says the log is seeded. The
- * session-owned tagged marker sits exactly at the cut and is the best evidence
- * available; a seeded log missing its marker falls back to the reported value.
+ * Getting this wrong double-counts a fork parent's tokens, so it is computed rather
+ * than assumed. The session-owned tagged marker sits exactly at the cut and is the
+ * only reliable evidence: the SDK reconstructs the cut from that marker itself, and
+ * the current physical header format never serializes `inheritedEventCount` at all
+ * (only the legacy v0 artifacts carried such a field). A seeded log is also rejected
+ * upstream if it lacks the tagged marker, so the marker is expected to be present.
+ *
+ * The `reported` fallback is therefore a defensive branch rather than a live path: it
+ * exists so an unforeseen snapshot shape yields a plausible cut instead of silently
+ * folding the whole inherited prefix. Note it is used as a COUNT, while the SDK's own
+ * value is the marker's SEQ — the two differ by one on a log where both are present,
+ * which is harmless because the extra skipped event is the marker itself and carries
+ * no usage.
  *
  * Note that an UNTAGGED `session/end-seed` marker is a lifecycle boundary that
  * most ordinary sessions carry, so it must never be treated as a cut.
@@ -447,13 +459,17 @@ async function backfill(sessionQuery) {
             // rather than letting real tokens disappear from the totals.
             const legacy = readLegacySession(id);
             if (legacy !== null) {
+              // `foldSession` already advanced this session's cursor to the archive's
+              // highest seq; re-setting it here would only restate that value.
               foldSession(
                 { id, cwd: legacy.cwd ?? record.header.cwd ?? null, isSeeded: false },
                 legacy.events,
                 0,
               );
               ledger.telemetry.recovered += 1;
-              ledger.sessionCursor.set(id, ledger.sessionCursor.get(id) ?? -1);
+              // Still marked unreadable — the service cannot open this log, so a later
+              // pass must not retry it — but the usage is now counted, which is what
+              // keeps the tokens from vanishing.
               ledger.unreadable.set(id, reasonOf(error));
               return;
             }
@@ -573,11 +589,30 @@ function createHandler(ctx) {
 
     try {
       await backfill(sessionQuery);
+      // A pass that completed makes the corpus complete, so an earlier poll's failure
+      // no longer describes this payload. Both halves of the report go away: the flag,
+      // and the reason entry, which is transient in a way a session read failure is
+      // not — those sessions stay unreadable, this enumeration does not stay broken.
+      ledger.telemetry.corpusFailures = 0;
+      const reasons = ledger.telemetry.failureReasons;
+      const healed = reasons.findIndex((entry) => entry.example === '(corpus)');
+      if (healed !== -1) reasons.splice(healed, 1);
     } catch (error) {
-      // A failure to enumerate the corpus at all is reported once and does not
-      // stop the route from serving whatever was folded.
+      // A failure to enumerate the corpus at all is reported once and does not stop
+      // the route from serving whatever was folded. Retrying on the NEXT request is
+      // deliberate: `backfill` clears its in-flight promise even when it throws, so a
+      // transient failure heals itself without a restart.
+      //
+      // The flag exists because this failure is otherwise invisible in exactly the
+      // case that matters most. While it lasts `seeded` stays false, so the live feed
+      // refuses every session it cannot yet classify (see `onSessionEvent`), and the
+      // route serves a payload whose counters all read zero — a wrong answer with no
+      // sign that anything went wrong.
+      ledger.telemetry.corpusFailures = 1;
       const reason = reasonOf(error);
-      if (!ledger.telemetry.failureReasons.some((entry) => entry.reason === reason)) {
+      // Compared against corpus entries only: a session read failure carrying the same
+      // message must not suppress this one, since they describe different problems.
+      if (!ledger.telemetry.failureReasons.some((entry) => entry.example === '(corpus)' && entry.reason === reason)) {
         ledger.telemetry.failureReasons.push({ key: reason, reason, count: 1, example: '(corpus)' });
       }
     }

@@ -94,6 +94,14 @@ function nextSlot() {
   record.cursor += 1;
   return { pool: record.pool, index };
 }
+/** Whether two dependency lists are the same for React's purposes. */
+function sameDeps(previous, next) {
+  if (previous === undefined) return false;
+  if (!Array.isArray(previous) || !Array.isArray(next)) return false;
+  if (previous.length !== next.length) return false;
+  return previous.every((value, index) => Object.is(value, next[index]));
+}
+
 /** The stubbed React surface the bundle requires. */
 const ReactStub = {
   createElement: element,
@@ -105,10 +113,21 @@ const ReactStub = {
     };
     return [pool.values[index], set];
   },
-  useEffect(effect) {
+  /**
+   * Collect a component's effect for this pass, honouring its dependency list.
+   *
+   * Deps matter to the tests, not just to React: a pass that re-runs every effect
+   * regardless would refetch and re-animate on renders where the real framework does
+   * nothing, and an assertion that a state change triggers work would hold even when
+   * the change is not what triggers it. Only effects whose deps actually moved are
+   * queued, so a test that runs the queue is running what React would.
+   */
+  useEffect(effect, deps) {
     const { pool, index } = nextSlot();
-    if (!(index in pool.refs)) pool.refs[index] = { effect };
-    pool.effects.push(effect);
+    const previous = pool.refs[index];
+    const changed = !sameDeps(previous?.deps, deps);
+    pool.refs[index] = { effect, deps };
+    if (changed) pool.effects.push(effect);
   },
   useRef(initial) {
     const { pool, index } = nextSlot();
@@ -314,22 +333,30 @@ function collectLogs(root) {
   return found;
 }
 
-/** Cached real-corpus payload: decompressing every log is too slow to repeat per test. */
+/**
+ * The opt-in real-corpus smoke test's payload, or null when it is not enabled.
+ *
+ * Reading the machine's own session store made this suite non-hermetic: several tests
+ * depended on the corpus being fresh, dense, and multi-route, so a quiet week or a
+ * single-route store turned them red for reasons unrelated to the code. The default
+ * run is now fully synthetic (see `payloadSynthetic`), and this path is opt-in via
+ * `USAGE_STATS_REAL_LOGS=1` so real logs can still be folded on demand — they remain
+ * the only fixture nobody wrote by hand, which is what makes them worth keeping.
+ *
+ * Build once: decompressing the whole store is far too slow to repeat per test.
+ */
 let realPayloadCache;
 let realPayloadLoaded = false;
 
-/**
- * Build a payload from the real session corpus, or null when this machine has
- * none (the suite then falls back to a synthetic payload).
- */
-function payloadFromRealLogs() {
+function realLogsPayload() {
+  if (process.env.USAGE_STATS_REAL_LOGS !== '1') return null;
   if (realPayloadLoaded) return realPayloadCache;
   realPayloadLoaded = true;
   realPayloadCache = buildRealPayload();
   return realPayloadCache;
 }
 
-/** The uncached real-corpus build. */
+/** The uncached real-corpus build; null when the store holds nothing usable. */
 function buildRealPayload() {
   const logs = collectLogs(join(homedir(), '.dsh', 'sessions'));
   if (logs.length === 0) return null;
@@ -393,39 +420,131 @@ function buildRealPayload() {
   });
 }
 
-/** A small synthetic payload, used only when the machine has no logs. */
+/**
+ * The view tests' default payload: a deterministic six-week corpus of three routes.
+ *
+ * It is built through the real fold and payload builders, so the shape under test is
+ * the shape the Host serves; only the input is fixed. Everything that would otherwise
+ * drift is pinned — a fixed timezone offset and fixed dates — because an earlier
+ * version of this suite read the machine's own session store and changed behaviour
+ * with whatever happened to be in it, which made tests fail for reasons that had
+ * nothing to do with the code they were checking.
+ *
+ * It deliberately carries what the views branch on:
+ *  - three routes over two providers, with `model-a` billed by two of them, so the
+ *    legend's disambiguation path is reachable;
+ *  - one dead day in the middle of the long route, so the trend has neighbouring
+ *    columns that really differ;
+ *  - a newest day that bills output only, so a cache rate that does not exist stays
+ *    distinguishable from a rate of zero;
+ *  - enough days for the x-axis label guard, the trend bar-width floor, and the
+ *    ratio bar's width cap to all be exercised;
+ *  - several routes billed inside the default seven-day window, so the ring and the
+ *    breakdown table have something to rank.
+ *
+ * Built fresh on every call, because several tests mutate the payload they are given.
+ */
 function payloadSynthetic() {
   const tzOffsetMinutes = 0;
   const aggregate = emptyAggregate();
-  const events = [];
-  for (let day = 1; day <= 9; day += 1) {
-    events.push({
-      type: 'assistant/message',
-      seq: day,
-      time: Date.UTC(2026, 0, day, 12),
-      data: { usage: { inputTokens: 100 * day, outputTokens: 10 * day, cacheReadTokens: 900 * day, cacheWriteTokens: 0 } },
-    });
+  const DAY_COUNT = 45;
+  const start = Date.UTC(2026, 5, 1, 12);
+  const dayTime = (offset) => start + offset * 86_400_000;
+  const dayKeys = Array.from({ length: DAY_COUNT }, (unused, offset) => (
+    new Date(dayTime(offset)).toISOString().slice(0, 10)
+  ));
+
+  const sessions = [
+    {
+      id: 'panel-alpha',
+      cwd: '/tmp/panel-alpha',
+      provider: 'alpha',
+      model: 'model-a',
+      // The long route: every day but one, so the trend has a real gap in it.
+      days: Array.from({ length: DAY_COUNT }, (unused, offset) => offset).filter((offset) => offset !== 20),
+      usage: (offset) => ({
+        inputTokens: 900 + offset * 31,
+        outputTokens: 120 + offset * 3,
+        cacheReadTokens: 250_000 + offset * 1_700,
+        cacheWriteTokens: 0,
+      }),
+    },
+    {
+      id: 'panel-beta',
+      cwd: '/tmp/panel-beta',
+      provider: 'beta',
+      model: 'model-b',
+      // Two bursts, the second covering the newest days, so the default trailing
+      // window has more than one route to rank.
+      days: [5, 6, 7, ...Array.from({ length: DAY_COUNT - 30 }, (unused, index) => 30 + index)],
+      usage: (offset) => ({
+        inputTokens: 1_400 + offset * 19,
+        outputTokens: 260 + offset * 5,
+        cacheReadTokens: 90_000 + offset * 640,
+        cacheWriteTokens: 0,
+      }),
+    },
+    {
+      id: 'panel-gamma',
+      cwd: '/tmp/panel-gamma',
+      provider: 'gamma',
+      // The same model id as alpha under a different provider: the legend has to
+      // qualify one of them rather than print the same name twice.
+      model: 'model-a',
+      days: Array.from({ length: 5 }, (unused, index) => DAY_COUNT - 5 + index),
+      usage: (offset) => ({
+        inputTokens: 300 + offset,
+        outputTokens: 40 + offset,
+        cacheReadTokens: 4_000,
+        cacheWriteTokens: 0,
+      }),
+    },
+  ];
+
+  for (const session of sessions) {
+    const events = [{
+      type: 'request/header',
+      seq: 1,
+      time: dayTime(session.days[0]),
+      data: { header: { config: { provider: session.provider, model: session.model } } },
+    }];
+    let seq = 2;
+    for (const offset of session.days) {
+      const usage = session.usage(offset);
+      // The newest day bills output only, so the window holds one day whose cache
+      // rate does not exist — which must not be drawn as 0%.
+      const billed = offset === DAY_COUNT - 1
+        ? { ...usage, inputTokens: 0, cacheReadTokens: 0 }
+        : usage;
+      events.push({ type: 'assistant/message', seq, time: dayTime(offset), data: { usage: billed } });
+      seq += 1;
+    }
+    foldSessionIntoAggregate(
+      aggregate,
+      { events, inheritedEventCount: 0, sessionId: session.id, cwd: session.cwd },
+      { tzOffsetMinutes },
+    );
   }
-  foldSessionIntoAggregate(aggregate, { events, inheritedEventCount: 0, sessionId: 's', cwd: '/tmp/proj' }, { tzOffsetMinutes });
+
+  const lastDay = dayKeys[DAY_COUNT - 1];
   return buildPayload(aggregate, {
     revision: 1,
     seeding: false,
     tzOffsetMinutes,
-    from: '2026-01-01',
-    to: '2026-01-09',
-    today: '2026-01-09',
-    telemetry: { sessionsScanned: 1, sessionsFailed: 0 },
+    from: dayKeys[0],
+    to: lastDay,
+    today: lastDay,
+    telemetry: { sessionsScanned: sessions.length, sessionsFailed: 0 },
   });
 }
 
 /**
  * A dense year of days, the shape the Host route actually serves for `?days=371`.
  *
- * The real corpus on this machine starts only weeks ago, so its payload spans a
- * handful of week columns — far too narrow to place a year of month labels or to
- * expose a column pitch that stretches. This fixture works every third day across
- * a full year, so the heat ramp, the month strip, and the trend window all meet
- * real spacing.
+ * This fixture works every third day across a full year, so the heat ramp, the month
+ * strip, and the trend window all meet real spacing: the synthetic six-week corpus is
+ * far too narrow to place a year of month labels or to expose a stretched column
+ * pitch.
  */
 function payloadYear() {
   const tzOffsetMinutes = 0;
@@ -502,6 +621,40 @@ function payloadGapTrend() {
 }
 
 //#endregion
+
+test('the panel renders a real session store without throwing', { skip: payloadDisabled() }, () => {
+  // The one case that is not synthetic, and it is opt-in: set USAGE_STATS_REAL_LOGS=1
+  // to fold this machine's own corpus. It asserts only what is true of ANY corpus —
+  // every view renders, the tree is finite, no readout is pre-opened — because the
+  // real store's contents are not something a test may depend on. What it catches is
+  // the shape nobody wrote a fixture for: an unusual cwd, a sparse month, a legacy
+  // archive, a model id with characters the fixtures never use.
+  const payload = realLogsPayload();
+  const { tree } = renderWith(payload);
+  const nodes = tags(tree);
+
+  assert.ok(nodes.some((node) => node.type === 'style'), 'the stylesheet renders');
+  assert.ok(nodes.some((node) => hasClass(node, 'usage-panel')), 'the panel root renders');
+  assert.ok(nodes.some((node) => hasClass(node, 'usage-body')), 'the body renders');
+  assert.equal(nodes.filter((node) => hasClass(node, 'usage-tip')).length, 0, 'no readout opens by itself');
+  // The ring and the breakdown table are built from one route list, so they describe
+  // the same window: if the payload's route rows were shaped in a way the render did
+  // not expect, these two would disagree about how many models there are. Counted by
+  // the model cell rather than by `tr`, so the table's own header row is not a model.
+  assert.equal(
+    nodes.filter((node) => hasClass(node, 'usage-donut-row')).length,
+    nodes.filter((node) => hasClass(node, 'usage-model')).length,
+    'the ring legend and the breakdown table list the same models',
+  );
+});
+
+/**
+ * Whether the real-corpus case has nothing to run against.
+ * @returns {boolean} true when the opt-in is off or the store is empty.
+ */
+function payloadDisabled() {
+  return realLogsPayload() === null;
+}
 
 test('the bundle registers the sidebar entry and the main panel under one id', () => {
   const registrations = new Map();
@@ -648,7 +801,7 @@ function hover(node, handler, point = { clientX: 40, clientY: 60 }) {
 //#endregion
 
 test('the panel renders real data without throwing', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const nodes = tags(tree);
@@ -675,7 +828,7 @@ test('the panel renders real data without throwing', () => {
 });
 
 test('the heatmap covers every day in the window exactly once', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   // Hoverable cells are the real days; the head padding carries no handler.
@@ -824,7 +977,7 @@ test('long month names are dropped only where the collision rule requires it', (
 });
 
 test('the heatmap pads the head and the grid to whole weeks, keeping weekdays aligned', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const all = tags(tree).filter((node) => node.type === 'div' && hasClass(node, 'usage-cell'));
@@ -841,7 +994,7 @@ test('the heatmap pads the head and the grid to whole weeks, keeping weekdays al
 });
 
 test('the heatmap labels each month above its first column', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const labels = tags(tree).filter((node) => node.type === 'span' && node.props.style !== undefined && node.props.style.gridColumn !== undefined);
@@ -950,7 +1103,7 @@ test('month labels are Chinese, under the zh dictionary the panel ships', () => 
 });
 
 test('the panel lifts the theme border weight and derives its own caption tone', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
   const css = nodes.find((node) => node.type === 'style').props.children[0];
 
@@ -1067,8 +1220,70 @@ test('the heatmap divides the card width between its columns and stays square', 
   );
 });
 
+test('a corpus wider than the card is scrolled rather than spilled past its edge', () => {
+  // The route caps its window at 1100 days, and `days` is a floor: a corpus older
+  // than the requested window widens it back to the corpus start. Laid out at the
+  // grid's 9px floor with a 2px gutter, a year-past-a-year is ~158 columns, or
+  // ~1736px — far past the 928px a section leaves inside the 960px column. The
+  // scroller is what keeps the excess reachable; without it the newest weeks sit
+  // outside the card with no way to get to them.
+  const tzOffsetMinutes = 0;
+  const aggregate = emptyAggregate();
+  foldSessionIntoAggregate(
+    aggregate,
+    {
+      events: [{
+        type: 'assistant/message',
+        seq: 1,
+        time: Date.UTC(2024, 0, 1, 12),
+        data: { usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 5, cacheWriteTokens: 0 } },
+      }],
+      inheritedEventCount: 0,
+      sessionId: 'wide',
+      cwd: '/tmp/wide',
+    },
+    { tzOffsetMinutes },
+  );
+  const payload = buildPayload(aggregate, {
+    revision: 4,
+    seeding: false,
+    tzOffsetMinutes,
+    from: '2024-01-01',
+    to: '2027-01-04',
+    today: '2027-01-04',
+    telemetry: { sessionsScanned: 1, sessionsFailed: 0 },
+  });
+
+  const nodes = tags(renderWith(payload).tree);
+  const css = nodes.find((node) => node.type === 'style').props.children[0];
+  const wrap = nodes.find((node) => hasClass(node, 'usage-heat-wrap'));
+  const columns = Number(wrap.props.style['--usage-columns']);
+
+  // One 9px cell plus its 2px gutter is the narrowest pitch a column may keep.
+  const FLOOR_PX = 9;
+  const GAP_PX = 2;
+  const CARD_CONTENT_PX = 960 - 2 * 16;
+  const floorWidth = columns * FLOOR_PX + (columns - 1) * GAP_PX;
+
+  assert.ok(columns >= 85, `this fixture has to overflow to be worth asserting (${columns} columns)`);
+  assert.ok(
+    floorWidth > CARD_CONTENT_PX,
+    `the floor pitch needs ${floorWidth}px of a ${CARD_CONTENT_PX}px card, so the row must scroll`,
+  );
+  assert.match(
+    css,
+    /\.usage-heat-scroll\s*\{[^}]*overflow-x:\s*auto/,
+    'the overflow goes into a scroller instead of out of the card',
+  );
+  assert.match(
+    css,
+    /\.usage-heat-months,\s*\n?\.usage-heat\s*\{[^}]*minmax\(9px,\s*1fr\)/,
+    'the floor the scroller exists for is still the track minimum',
+  );
+});
+
 test('the panel renders the headline cards and the model table from real data', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const classes = tags(tree).map((node) => node.props.className).filter((value) => typeof value === 'string');
@@ -1081,20 +1296,41 @@ test('the panel renders the headline cards and the model table from real data', 
   assert.ok(text.includes('allTokens'), 'shows the cumulative-token card');
   assert.ok(text.includes('cacheRate'), 'shows the cache-rate card');
   // The table follows the range control, so it lists the models billed inside the
-  // active window rather than every model the corpus ever saw. Each named model
-  // still has to be one the payload actually reports.
-  const named = payload.routes.filter((route) => text.includes(route.model));
-  assert.ok(named.length > 0, 'the table names at least one model from the payload');
-  for (const route of named) {
+  // active window rather than every model the corpus ever saw. Recomputed here from
+  // the payload's own per-route series — the same window the panel opens on — and
+  // compared as a set, both directions: a model missing from the table is as wrong
+  // as one in it that the window does not bill.
+  const window = payload.trend.days.slice(-7);
+  const expected = payload.trend.routes
+    .filter((route) => route.days.some((row) => (
+      window.includes(row.day)
+      && (row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens) > 0
+    )))
+    .map((route) => `${route.provider}/${route.model}`)
+    .sort();
+  assert.ok(expected.length > 0, 'the fixture bills something inside the default window');
+
+  const listed = tags(tree)
+    .filter((node) => hasClass(node, 'usage-model'))
+    .map((node) => nodeText(node));
+  // A route whose model id is shared across providers is printed as `model (provider)`
+  // by the legend but bare in the table, so compare on the model column's own text and
+  // assert the counts agree rather than trying to rebuild the disambiguated label.
+  assert.equal(
+    listed.length,
+    expected.length,
+    `the table lists the window's models (${listed.join(', ')} vs ${expected.join(', ')})`,
+  );
+  for (const route of expected) {
     assert.ok(
-      payload.routes.some((entry) => entry.model === route.model && entry.provider === route.provider),
-      `the table only names models the payload carries (${route.model})`,
+      listed.includes(route.split('/')[1]),
+      `the table names ${route}, which the window bills`,
     );
   }
 });
 
 test('the breakdown table groups by provider, drops cache write, and caps its height', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
 
   const css = nodes.find((node) => node.type === 'style').props.children[0];
@@ -1154,7 +1390,7 @@ test('the breakdown table groups by provider, drops cache write, and caps its he
 });
 
 test('the header carries the title and Refresh, and nothing else', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const head = tags(tree).find((node) => hasClass(node, 'usage-head'));
@@ -1174,7 +1410,7 @@ test('the header carries the title and Refresh, and nothing else', () => {
 });
 
 test('the range control sits above the sections it drives and redraws all three', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const bars = (nodes) => nodes.filter((node) => node.type === 'rect' && hasClass(node, 'usage-bar')).length;
   const tabs = (nodes) => nodes.filter((node) => node.props.role === 'tab');
   const slices = (nodes) => nodes.filter((node) => node.type === 'circle' && typeof node.props.strokeDasharray === 'string').length;
@@ -1312,7 +1548,7 @@ test('the range control sits above the sections it drives and redraws all three'
 });
 
 test('switching the range drops a hover that the new window no longer holds', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   // Hover a column that only exists in the wider window, then switch to 7 days.
@@ -1354,7 +1590,7 @@ test('switching the range drops a hover that the new window no longer holds', ()
 });
 
 test('the trend chart stacks input and output per day and bars the cache rate', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   // The range control opens on its narrow window, and the chart plots that many
@@ -1490,27 +1726,36 @@ test('the ratio bar stays inside its 0..100% axis and never covers the stack', (
 });
 
 test('the trend chart no longer draws a line per model', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
-  const named = textOf(tree);
-  // Route ids left the trend chart; the donut and the table below still carry them.
+  // The fixture has to carry named routes, or the loop below would pass on an empty
+  // list and prove nothing.
+  const named = payload.routes.filter((route) => route.model !== 'unknown');
+  assert.ok(named.length >= 2, 'the fixture bills more than one named model');
+
   const trendSection = tags(tree).filter((node) => (
     hasClass(node, 'usage-section') && nodeText(node).includes('dailyTrend')
   ));
   assert.equal(trendSection.length, 1, 'the trend section renders once');
   const trendText = textOf(trendSection[0]);
-  for (const route of payload.routes.slice(0, 3)) {
+  for (const route of named) {
     assert.ok(
-      !trendText.includes(route.model) || route.model === 'unknown',
+      !trendText.includes(route.model),
       `the trend chart does not name the model ${route.model}`,
     );
   }
-  assert.ok(named.length > 0, 'the panel still renders');
+  // The complement: those same models DO appear below the trend, so this is a check
+  // on the trend's own legend rather than on a payload that names nothing anywhere.
+  const rest = textOf(tree).replace(trendText, '');
+  assert.ok(
+    named.some((route) => rest.includes(route.model)),
+    'the donut or the breakdown table still names those models',
+  );
 });
 
 test('the model donut renders one slice per route billed in the selected window', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   // The ring follows the range control, so it plots the routes billed inside the
@@ -1551,7 +1796,7 @@ test('the model donut renders one slice per route billed in the selected window'
 });
 
 test('the donut ring keeps its own size instead of stretching to the card', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
 
   const css = nodes.find((node) => node.type === 'style').props.children[0];
@@ -1573,7 +1818,7 @@ test('the donut ring keeps its own size instead of stretching to the card', () =
 });
 
 test('the donut and its legend sit side by side, the legend divided rather than boxed', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
 
   const css = nodes.find((node) => node.type === 'style').props.children[0];
@@ -1675,6 +1920,49 @@ test('unreadable and recovered sessions are reported, with their reasons', () =>
   assert.ok(text.includes('sessionsRecovered'), 'reports sessions recovered from a legacy format');
   assert.ok(text.includes('format v0 is unsupported'), 'names the failure reason');
   assert.ok(text.includes('x2') || text.includes('\u00d72'), 'repeats a shared reason once with its count');
+});
+
+test('an unenumerated corpus is reported even though every counter reads zero', () => {
+  // The state this pins down: `listSessions()` threw, so nothing was folded. Every
+  // session counter is legitimately 0, and gating the diagnostics on those counters
+  // is what used to render a payload of zeroes with no explanation at all — the
+  // figures are not merely empty, they are wrong.
+  const payload = payloadSynthetic();
+  payload.warnings = {
+    malformedUsageEvents: 0,
+    sessionsScanned: 0,
+    sessionsFailed: 0,
+    recoveredSessions: 0,
+    corpusFailures: 1,
+    failureReasons: [{ key: 'list boom', reason: 'list boom', count: 1, example: '(corpus)' }],
+  };
+  const { tree } = renderWith(payload);
+
+  const text = textOf(tree);
+  assert.ok(text.includes('corpusFailed'), 'says the corpus was never enumerated');
+  assert.ok(text.includes('list boom'), 'names why the enumeration failed');
+  const notes = tags(tree).filter((node) => hasClass(node, 'usage-stage-note'));
+  assert.equal(notes.length, 1, 'the diagnostics block renders');
+});
+
+test('a healed corpus failure leaves no diagnostic behind', () => {
+  // The host clears both the flag and the reason entry on the pass that succeeds. A
+  // transient failure must not pin a permanent warning to every later payload.
+  const payload = payloadSynthetic();
+  payload.warnings = {
+    malformedUsageEvents: 0,
+    sessionsScanned: 12,
+    sessionsFailed: 0,
+    recoveredSessions: 0,
+    corpusFailures: 0,
+    failureReasons: [],
+  };
+  const { tree } = renderWith(payload);
+  const classes = tags(tree).map((node) => node.props.className).filter((value) => typeof value === 'string');
+  assert.ok(
+    !classes.some((value) => value.includes('usage-stage-note')),
+    'a corpus that enumerated cleanly says nothing',
+  );
 });
 
 test('a failing load surfaces an error instead of a blank panel', async () => {
@@ -1824,13 +2112,8 @@ test('a same-revision poll keeps the previous state object so React can skip the
   }
 });
 
-/**
- * The minimum-loading hold is exercised by the loader-driven tests above, which
- * go through the same `finish()` path. Driving it from a click would need the
- * stub to re-render on state change, which this harness deliberately does not do.
- */
 test('Refresh is the only control outside the trend window', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
   const buttons = tags(tree).filter((node) => node.type === 'button');
   assert.deepEqual(
@@ -1843,8 +2126,90 @@ test('Refresh is the only control outside the trend window', () => {
   assert.equal(refresh.props.type, 'button');
   assert.equal(typeof refresh.props.onClick, 'function');
 });
+
+test('clicking Refresh refetches and holds the spinner while it is in flight', async () => {
+  const payload = payloadSynthetic();
+  const registrations = new Map();
+  loadBundle(registrations);
+  freshMount();
+
+  const searches = [];
+  const load = async (search) => {
+    searches.push(search);
+    return { ok: true, json: async () => payload };
+  };
+
+  // The spinner's minimum lifetime is a real timer; stubbing it is what lets the test
+  // drive `finish()` without waiting, and lets it assert the hold exists at all.
+  const holds = [];
+  const previousSetTimeout = globalThis.setTimeout;
+  const previousClearTimeout = globalThis.clearTimeout;
+  const previousSetInterval = globalThis.setInterval;
+  const previousClearInterval = globalThis.clearInterval;
+  globalThis.setTimeout = (callback, delay) => {
+    holds.push({ callback, delay });
+    return holds.length;
+  };
+  globalThis.clearTimeout = () => {};
+  // The polling interval is covered by its own test; here it only has to not leak.
+  globalThis.setInterval = () => 1;
+  globalThis.clearInterval = () => {};
+
+  const releaseBusy = () => {
+    for (const hold of holds.splice(0)) hold.callback();
+  };
+  const cleanups = [];
+
+  try {
+    const props = { t: (key) => key, locale: 'en', load };
+    const mountTree = renderPanel(registrations, props);
+    const mountButton = tags(mountTree).find((node) => node.type === 'button' && nodeText(node) === 'refresh');
+    // The initial render happens before the effect runs, so the spinner is up and
+    // the control is disabled until the first response settles.
+    assert.equal(mountButton.props.disabled, true, 'Refresh is disabled while the first load runs');
+
+    for (const effect of hookState.effects) {
+      const cleanup = effect();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    }
+    await settle();
+    assert.deepEqual(searches, ['?days=371'], 'the mount fetch asks for the heatmap year');
+    assert.equal(holds.length, 1, 'the spinner holds for its minimum lifetime');
+    assert.equal(holds[0].delay, 300, 'the hold is the documented minimum');
+
+    releaseBusy();
+    rerender();
+    const settledTree = renderPanel(registrations, props);
+    const settledButton = tags(settledTree).find((node) => node.type === 'button' && nodeText(node) === 'refresh');
+    assert.equal(settledButton.props.disabled, false, 'the control is usable once the load settles');
+
+    // The click itself: it bumps the tick the effect depends on, so the next render
+    // re-arms the effect and the panel actually goes back to the Host. A click that
+    // only repainted would leave the spinner up forever.
+    settledButton.props.onClick();
+    rerender();
+    const busyTree = renderPanel(registrations, props);
+    const busyButton = tags(busyTree).find((node) => node.type === 'button' && nodeText(node) === 'refresh');
+    assert.equal(busyButton.props.disabled, true, 'the click disables the control again');
+
+    for (const effect of hookState.effects) {
+      const cleanup = effect();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    }
+    await settle();
+    assert.deepEqual(searches, ['?days=371', '?days=371'], 'the click refetched from the Host');
+    assert.equal(holds.length, 1, 'the refetch holds the spinner for the same minimum');
+    releaseBusy();
+  } finally {
+    for (const cleanup of cleanups) cleanup();
+    globalThis.setTimeout = previousSetTimeout;
+    globalThis.clearTimeout = previousClearTimeout;
+    globalThis.setInterval = previousSetInterval;
+    globalThis.clearInterval = previousClearInterval;
+  }
+});
 test('every chart element exposes a hover readout handle', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
 
   const cells = tags(tree).filter((node) => node.type === 'div' && hasClass(node, 'usage-cell') && node.props.onMouseEnter !== undefined);
@@ -1860,7 +2225,7 @@ test('every chart element exposes a hover readout handle', () => {
 });
 
 test('hovering a heatmap cell shows that day and nothing else', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   rerender();
@@ -1882,7 +2247,7 @@ test('hovering a heatmap cell shows that day and nothing else', () => {
 });
 
 test('hovering a donut slice reports that model and its share', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   rerender();
@@ -1900,7 +2265,7 @@ test('hovering a donut slice reports that model and its share', () => {
 });
 
 test('hovering the trend chart reports input, output, total, and the cache rate', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   rerender();
@@ -1986,7 +2351,7 @@ test('the trend readout prints token values in units, not in full digits', () =>
 });
 
 test('a pointer moving inside the heatmap keeps the readout the cell published', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   rerender();
@@ -2015,7 +2380,7 @@ test('a pointer moving inside the heatmap keeps the readout the cell published',
 });
 
 test('the activity heatmap carries no legend', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const nodes = tags(renderWith(payload).tree);
 
   assert.ok(nodes.some((node) => hasClass(node, 'usage-heat')), 'the heatmap renders');
@@ -2063,7 +2428,7 @@ function shortDayText(day) {
 }
 
 test('the donut readout sits in the box its offsets are measured from', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { registrations, props } = renderWith(payload);
 
   // Hover a slice, then walk once and inspect where the readout landed in the tree.
@@ -2106,7 +2471,7 @@ function poolSnapshot() {
  * reverse and is covered by the hover tests above.
  */
 test('no readout is rendered before any hover', () => {
-  const payload = payloadFromRealLogs() ?? payloadSynthetic();
+  const payload = payloadSynthetic();
   const { tree } = renderWith(payload);
   assert.equal(tags(tree).filter((node) => hasClass(node, 'usage-tip')).length, 0, 'the panel starts with no readout');
 });
