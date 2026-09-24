@@ -69,7 +69,13 @@ const LIVE_FOLD_ERROR_LIMIT = 3;
 const ledger = {
   aggregate: emptyAggregate(),
   revision: 0,
-  /** Highest session seq already folded, per session id. Absence means never scanned. */
+  /**
+   * Highest session seq already folded, per session id.
+   *
+   * Absence means this session has contributed nothing yet: either the corpus pass
+   * still owns it, or no enumeration has run to decide who does, or it is simply
+   * new and the live feed has not adopted it.
+   */
   sessionCursor: new Map(),
   /** Last known route per session, so an incremental fold keeps model attribution. */
   sessionRoute: new Map(),
@@ -81,6 +87,17 @@ const ledger = {
    * forever rather than describing a fixed number of problems.
    */
   unreadable: new Map(),
+  /**
+   * Session ids the corpus pass listed, so the two contributors can partition the
+   * corpus between them instead of racing over it.
+   *
+   * A listed session's history belongs to the pass — it reads the whole log, so a
+   * live event for it must stay out of the aggregate until the cursor the pass
+   * leaves behind takes over. A session the pass never listed has no other
+   * contributor at all, and that is every conversation started while the server is
+   * up: nothing else can ever count it.
+   */
+  corpus: new Set(),
   /** Set once the corpus has been enumerated, so backfill is a one-time job. */
   seeded: false,
   seeding: false,
@@ -245,6 +262,9 @@ export function reasonOf(error) {
  */
 function markUnreadable(sessionId, error) {
   const reason = reasonOf(error);
+  // The pass has given up on this log, so it is no longer the pass's to own: its
+  // live settlements have no other contributor and must be free to be folded.
+  ledger.corpus.delete(sessionId);
   if (ledger.unreadable.has(sessionId)) return;
   ledger.unreadable.set(sessionId, reason);
   ledger.telemetry.sessionsFailed += 1;
@@ -400,6 +420,7 @@ async function backfill(sessionQuery) {
     ledger.seeding = true;
     try {
       const records = await sessionQuery.listSessions();
+      for (const record of records) ledger.corpus.add(String(record.header.id));
       const pending = records.filter((record) => {
         const id = String(record.header.id);
         return !ledger.sessionCursor.has(id) && !ledger.unreadable.has(id);
@@ -451,13 +472,31 @@ async function backfill(sessionQuery) {
   return ledger.backfill;
 }
 
-/** Fold one live session event into the aggregate. */
+/**
+ * Fold one live session event into the aggregate.
+ *
+ * The corpus pass and this feed must partition the sessions between them exactly
+ * once, or a settlement is either lost or counted twice:
+ *
+ *  - a session the pass LISTED belongs to the pass, which reads its whole log; a
+ *    live event for it stays out of the aggregate until the cursor the pass leaves
+ *    behind takes over. Folding it here as well would double its tokens.
+ *  - a session the pass never listed has no other contributor at all. That is
+ *    every conversation started after the pass enumerated the corpus, which is
+ *    every conversation started while the server is up; refusing those left
+ *    "today" showing only what the last restart had already found on disk.
+ *
+ * Before the pass has enumerated anything the two cases are indistinguishable — an
+ * unseen id may be a brand-new session or an older one that a user has just
+ * resumed ahead of the pass — and the pass will fold both in full, so nothing is
+ * claimed yet.
+ */
 function onSessionEvent(session, event) {
   const id = String(session.id);
-  // Only sessions the corpus pass already accounted for contribute live events;
-  // otherwise the same settlement could be folded once here and once by the pass.
-  if (!ledger.sessionCursor.has(id)) return;
 
+  // A route event names the model for the settlements that follow it, including
+  // the very first one of a session this feed is about to adopt, so it is cached
+  // whether or not the session is already known. It carries no tokens.
   if (event.type === 'request/header' || event.type === 'request/context') {
     ledger.sessionRoute.set(id, event);
     return;
@@ -465,7 +504,17 @@ function onSessionEvent(session, event) {
   if (event.type !== 'assistant/message') return;
 
   const seq = typeof event.seq === 'number' ? event.seq : 0;
-  const lastIndexed = ledger.sessionCursor.get(id) ?? -1;
+  let lastIndexed = ledger.sessionCursor.get(id);
+  if (lastIndexed === undefined) {
+    // Listed by the pass: its history is the pass's to fold.
+    if (ledger.corpus.has(id)) return;
+    // Nothing has enumerated the corpus yet, so this id may be an older session
+    // the pass is about to fold in full — claiming it here would strand its
+    // history behind a cursor the pass then declines to fill.
+    if (!ledger.seeding && !ledger.seeded) return;
+    // A session no enumeration ever listed: this feed owns it from this event on.
+    lastIndexed = -1;
+  }
   if (seq <= lastIndexed) return;
 
   const route = ledger.sessionRoute.get(id);

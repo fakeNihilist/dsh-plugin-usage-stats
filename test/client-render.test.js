@@ -1899,6 +1899,69 @@ test('hovering the trend chart reports input, output, total, and the cache rate'
   assert.ok(!text.includes('colCacheRead'), 'the cache read is not stacked into the bars');
 });
 
+test('the heatmap readout prints token values in units, not in full digits', () => {
+  // A fixture with corpus-sized days: the point of the change only shows up once a
+  // value is long enough that the full digits are unreadable.
+  const payload = payloadGapTrend();
+  const { registrations, props } = renderWith(payload);
+
+  rerender();
+  const tree = renderPanel(registrations, props);
+  const cell = tags(tree).find((node) => node.type === 'div' && hasClass(node, 'usage-cell') && node.props.onMouseEnter !== undefined);
+  hover(cell, 'onMouseEnter');
+
+  rerender();
+  const tip = tags(renderPanel(registrations, props)).find((node) => hasClass(node, 'usage-tip'));
+  const text = textOf(tip);
+
+  // The first hoverable cell is the window's first day.
+  const day = payload.days[0];
+  assert.ok(day.inputTokens > 0 && day.cacheReadTokens > 0, 'the fixture day carries usage');
+  assert.ok(text.includes('40.6M'), `the day total is compacted, got: ${text}`);
+  assert.ok(text.includes('500K'), 'the input tokens are compacted');
+  assert.ok(text.includes('100K'), 'the output tokens are compacted');
+  assert.ok(text.includes('40.0M'), 'the cache read is compacted');
+  for (const value of [day.inputTokens, day.outputTokens, day.cacheReadTokens]) {
+    assert.ok(
+      !text.includes(value.toLocaleString()),
+      `the full figure ${value} is no longer printed`,
+    );
+  }
+  // The request count is a count, not a magnitude, so it stays a plain integer.
+  assert.equal(day.calls, 1);
+  assert.ok(text.includes('calls 1'), 'the request count is still printed exactly');
+});
+
+test('the trend readout prints token values in units, not in full digits', () => {
+  const payload = payloadGapTrend();
+  const { registrations, props } = renderWith(payload);
+
+  rerender();
+  const tree = renderPanel(registrations, props);
+  const svg = tags(tree).find((node) => node.type === 'svg' && node.props.onMouseMove !== undefined);
+  hover(svg, 'onMouseMove', { clientX: 400, clientY: 100 });
+
+  rerender();
+  const tip = tags(renderPanel(registrations, props)).find((node) => hasClass(node, 'usage-tip'));
+  const text = textOf(tip);
+
+  // Whichever column the pointer landed on, every token figure in the readout is a
+  // magnitude with a unit suffix…
+  assert.ok(/\d+(?:\.\d+)?[KMBT]\b/.test(text), `the readout shows a unit, got: ${text}`);
+  // …and no day's token figure is printed in full any more.
+  for (const row of payload.days) {
+    for (const value of [row.inputTokens, row.outputTokens, row.cacheReadTokens]) {
+      if (value <= 0) continue;
+      assert.ok(
+        !text.includes(value.toLocaleString()),
+        `the full figure ${value} is no longer printed`,
+      );
+    }
+  }
+  // The cache rate is a percentage, and stays one.
+  assert.ok(/%/.test(text), 'the cache rate is still a percentage');
+});
+
 test('a pointer moving inside the heatmap keeps the readout the cell published', () => {
   const payload = payloadFromRealLogs() ?? payloadSynthetic();
   const { registrations, props } = renderWith(payload);

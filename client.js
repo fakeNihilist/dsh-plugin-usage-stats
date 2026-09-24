@@ -705,17 +705,17 @@ body[data-ds-dark-theme] .usage-panel {
    rest of the card. Below the breakpoint they fall back to a single column, ring
    first. */
 .usage-donut {
-  padding: 0 30px;
+  padding: 0 64px;
   display: grid;
   grid-template-columns: ${DONUT_PX}px minmax(0, 1fr);
-  gap: 32px;
+  gap: 64px;
   align-items: center;
 }
 @media (max-width: 720px) { .usage-donut { grid-template-columns: minmax(0, 1fr); gap: 20px; } }
-.usage-donut-legend { display: flex; flex-direction: column; min-width: 0; }
+.usage-donut-legend { display: flex; flex-direction: column; min-width: 0; max-height: ${DONUT_PX}px;overflow: auto; }
 /* One entry per row, divided rather than boxed: the rule is what separates two
    models, so the last row must not carry one. */
-.usage-donut-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 3px 10px; align-items: center; padding: 9px 6px; cursor: default; border-top: 1px solid var(--usage-border); }
+.usage-donut-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0px 10px; align-items: center; padding: 6px 12px; cursor: default; border-top: 1px solid var(--usage-border); }
 .usage-donut-row:first-child { border-top: none; }
 .usage-donut-row[data-hover="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); border-radius: 6px; }
 .usage-donut-row > .usage-dot { grid-area: 1 / 1; }
@@ -971,16 +971,24 @@ body[data-ds-dark-theme] .usage-panel {
         monthName(monthIndex, t),
       );
 
-      /** The readout lines for one day. */
+      /**
+       * The readout lines for one day.
+       *
+       * Token values are compacted, not printed in full: the readout is a glance at
+       * a hovered cell, and a corpus day runs to hundreds of millions of tokens —
+       * "698.9M" is legible where the full digits are not. Every exact figure is
+       * still on the page, in the headline cards' notes and the breakdown table.
+       * The request count stays a plain integer: it is a count, not a magnitude.
+       */
       const linesFor = (day) => [
         { key: "title", text: dayLabel(day.day, locale), title: true },
-        { key: "total", label: t("tokens"), value: exact(total(day)) },
-        { key: "input", label: t("input"), value: exact(day.inputTokens) },
-        { key: "output", label: t("output"), value: exact(day.outputTokens) },
+        { key: "total", label: t("tokens"), value: compact(total(day)) },
+        { key: "input", label: t("input"), value: compact(day.inputTokens) },
+        { key: "output", label: t("output"), value: compact(day.outputTokens) },
         {
           key: "cache",
           label: t("cacheRead"),
-          value: exact(day.cacheReadTokens),
+          value: compact(day.cacheReadTokens),
         },
         { key: "rate", label: t("cacheRate"), value: percent(cacheRate(day)) },
         { key: "calls", label: t("calls"), value: exact(day.calls) },
@@ -1588,7 +1596,11 @@ body[data-ds-dark-theme] .usage-panel {
           .closest(".usage-section")
           .getBoundingClientRect();
         // The hovered column changes with the pointer, so this publishes the whole
-        // readout rather than only repositioning it.
+        // readout rather than only repositioning it. Token values are compacted
+        // ("698.9M"), which is what the y-axis beside them already prints — an exact
+        // figure in the readout disagreed with the scale it was read against, and a
+        // busy day's row of full digits is unreadable at a glance. The headline
+        // cards and the breakdown table still carry the exact counts.
         tip.show(
           { x: event.clientX - stageBox.left, y: event.clientY - stageBox.top },
           [
@@ -1597,13 +1609,13 @@ body[data-ds-dark-theme] .usage-panel {
               key: line.key,
               label: line.label,
               color: line.color,
-              value: exact(line.values[index]),
+              value: compact(line.values[index]),
             })),
             {
               key: "total",
               label: t("colTotal"),
               total: true,
-              value: exact(
+              value: compact(
                 series.reduce((sum, line) => sum + line.values[index], 0),
               ),
             },
@@ -1613,7 +1625,7 @@ body[data-ds-dark-theme] .usage-panel {
             {
               key: "cacheRead",
               label: t("cacheRead"),
-              value: exact(row.cacheReadTokens ?? 0),
+              value: compact(row.cacheReadTokens ?? 0),
             },
             {
               key: "rate",

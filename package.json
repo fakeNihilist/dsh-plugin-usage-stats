@@ -28,7 +28,8 @@
     "verify:read": "node verify/session-read-audit.js",
     "verify:v0": "node verify/v0-artifacts.js",
     "verify:corpus": "node verify/corpus-pass.js",
-    "verify:trend": "node verify/trend-inspect.js"
+    "verify:trend": "node verify/trend-inspect.js",
+    "verify:replay": "node verify/live-replay.js"
   },
   "dsh": {
     "bundle": {
